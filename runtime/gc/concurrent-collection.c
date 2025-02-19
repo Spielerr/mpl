@@ -7,6 +7,7 @@
  * Implementation of the concurrent collection interface
  */
 #include "concurrent-collection.h"
+#define SPLIT_SIZE 5
 
 
 
@@ -132,11 +133,11 @@ bool chunkIsInList(HM_chunk chunk, HM_chunkList list) {
 }
 
 bool isChunkInFromSpace(HM_chunk chunk, ConcurrentCollectArgs* args) {
-  return chunk->tmpHeap == args->fromHead;
+  return chunk->parentHeapId == args->parentHeapId && chunk->live == FALSE;
 }
 
 bool isChunkInToSpace(HM_chunk chunk, ConcurrentCollectArgs* args) {
-  return chunk->tmpHeap == args->toHead;
+  return chunk->parentHeapId == args->parentHeapId && chunk->live == TRUE;
 }
 
 // JATIN_NOTE: this function should be called only for in scope objects.
@@ -177,6 +178,22 @@ void markObj(pointer p) {
   // *headerp = header;
 }
 
+// V1: make marking the object safe using compare and swap
+// void markObj(pointer p) {
+//   GC_header header = getHeader(p);
+//   GC_header oldValue;
+//   GC_header newValue;
+//
+//   do {
+//     oldValue = header;                     // Read the current value of the header
+//     if (oldValue & MARK_MASK) {            // If already marked, no action is needed
+//       return;
+//     }
+//     newValue = oldValue | MARK_MASK;       // Prepare the new value with the MARK_MASK bit set
+//   } while (!__sync_bool_compare_and_swap(getHeaderp(p), oldValue, newValue)); // CAS loop
+// }
+
+
 // This function is exactly the same as in chunk.c.
 // The only difference is, it doesn't NULL the levelHead of the unlinking chunk.
 // TODO: replace with HM_unlinkChunkPreserveLevelHead (see chunk.c)
@@ -207,14 +224,8 @@ void CC_HM_unlinkChunk(HM_chunkList list, HM_chunk chunk) {
 }
 
 void saveChunk(HM_chunk chunk, ConcurrentCollectArgs* args) {
-  CC_HM_unlinkChunk(args->origList, chunk);
-  HM_appendChunk(args->repList, chunk);
-
-  assert(chunk->tmpHeap == args->fromHead);
-  chunk->tmpHeap = args->toHead;
-
-  HM_assertChunkListInvariants(args->origList);
-  HM_assertChunkListInvariants(args->repList);
+  assert(chunk->live == FALSE);
+  chunk->live = TRUE;
 }
 
 bool saveNoForward(
@@ -724,9 +735,7 @@ void CC_collectAtPublicLevel(GC_state s, GC_thread thread, uint32_t depth) {
 struct CC_tryUnpinOrKeepPinnedArgs {
   HM_remSet newRemSet;
   HM_HierarchicalHeap tgtHeap;
-
-  void* fromSpaceMarker;
-  void* toSpaceMarker;
+  uint32_t parentHeapId;
 };
 
 void CC_tryUnpinOrKeepPinned(
@@ -740,7 +749,9 @@ void CC_tryUnpinOrKeepPinned(
 
 #if ASSERT
   assert(isPinned(remElem->object));
-  assert(chunk->tmpHeap != args->toSpaceMarker);
+  // KKG_TODO_F: visit this and see if this assert makes sense
+  //assert(chunk->tmpHeap != args->toSpaceMarker);
+  assert(chunk->parentHeapId != args->parentHeapId || chunk->live != TRUE);
 #endif
 
 #if 0
@@ -755,7 +766,11 @@ void CC_tryUnpinOrKeepPinned(
   }
 #endif
 
-  if (chunk->tmpHeap != args->fromSpaceMarker) {
+  // KKG_TODO_F: check if the markers can be updated according to the new logic of fromSpace and toSpace
+  // i.e., consider parent heap id and liveness, not just liveness
+  // so this below if condition is not correct
+  if (chunk->parentHeapId != args->parentHeapId || chunk->live != FALSE) {
+  // if (chunk->tmpHeap != args->fromSpaceMarker) {
     /** It's possible to have a remset entry for an object elsewhere in the
       * chain. (When adding an remset entry for object at ancestor, this
       * object might live in the chain rather than the primary heap. Recall,
@@ -772,7 +787,10 @@ void CC_tryUnpinOrKeepPinned(
   }
 
   assert(isChunkInList(chunk, HM_HH_getChunkList(args->tgtHeap)));
-  assert(chunk->tmpHeap == args->fromSpaceMarker);
+  // KKG_TODO_F_DOUBT: same as before, this marker usage needs to be carefully checked
+  // V1: this doesn't make sense, args->fromSpaceMarker is not modified in HM_remember function
+  assert(chunk->parentHeapId == args->parentHeapId && chunk->live == FALSE);
+  // assert(chunk->tmpHeap == args->fromSpaceMarker);
   assert(HM_getLevelHead(chunk) == args->tgtHeap);
 
   // pointer p = objptrToPointer(remElem->object, NULL);
@@ -791,9 +809,13 @@ void CC_tryUnpinOrKeepPinned(
     // }
 
     HM_chunk fromChunk = HM_getChunkOf(objptrToPointer(remElem->from, NULL));
-    assert(fromChunk->tmpHeap != args->toSpaceMarker);
+    // KKG_TODO_F: more of this
+    // assert(fromChunk->tmpHeap != args->toSpaceMarker);
+    assert(fromChunk->parentHeapId != args->parentHeapId || fromChunk->live != TRUE);
 
-    if (fromChunk->tmpHeap == args->fromSpaceMarker) {
+    // if (fromChunk->tmpHeap == args->fromSpaceMarker) {
+    // KKG_TODO_F: more of this
+    if (fromChunk->parentHeapId == args->parentHeapId && fromChunk->live == FALSE) {
       assert(isChunkInList(fromChunk, HM_HH_getChunkList(args->tgtHeap)));
       return;
     }
@@ -840,8 +862,7 @@ void CC_filterPinned(
   GC_state s,
   uint32_t initialDepth,
   HM_HierarchicalHeap hh,
-  void* fromSpaceMarker,
-  void* toSpaceMarker)
+  uint32_t parentHeapId)
 {
   HM_remSet oldRemSet = HM_HH_getRemSet(hh);
   struct HM_remSet newRemSet;
@@ -851,11 +872,11 @@ void CC_filterPinned(
     "num pinned initially: %zu",
     HM_numRemembered(HM_HH_getRemSet(hh)));
 
+  // KKG_TODO_F: do you want to retain these markers?
   struct CC_tryUnpinOrKeepPinnedArgs args =
     { .newRemSet = &newRemSet
     , .tgtHeap = hh
-    , .fromSpaceMarker = fromSpaceMarker
-    , .toSpaceMarker = toSpaceMarker
+    , .parentHeapId = parentHeapId
     };
 
   struct HM_foreachDownptrClosure closure =
@@ -921,22 +942,18 @@ void CC_filterDownPointers(GC_state s, HM_chunkList x, HM_HierarchicalHeap hh){
 #endif
 
 
-void CC_collectWithRoots(
-  GC_state s,
+CGC_process* initializeCGC(GC_state s,
   HM_HierarchicalHeap targetHH,
-  __attribute__((unused)) GC_thread thread,
-  size_t *outputBytesSaved,
-  size_t *outputNumObjectsMarked)
-{
+  __attribute__((unused)) GC_thread thread) {
+
+  CGC_process* cgc_process = malloc(sizeof(CGC_process));
+
   getStackCurrent(s)->used = sizeofGCStateCurrentStackUsed(s);
   getThreadCurrent(s)->exnStack = s->exnStack;
   HM_HH_updateValues(getThreadCurrent(s), s->frontier);
 
-  struct timespec startTime;
-  struct timespec stopTime;
-
   Trace0(EVENT_CGC_ENTER);
-  timespec_now(&startTime);
+  timespec_now(&cgc_process->startTime);
 
   LOG(LM_CC_COLLECTION, LL_INFO,
     "CC collecting heap %p at depth %u",
@@ -944,6 +961,7 @@ void CC_collectWithRoots(
     HM_HH_getDepth(targetHH));
 
   ConcurrentPackage cp = HM_HH_getConcurrentPack(targetHH);
+  cgc_process->concurrent_package = cp;
   HM_assertChunkListInvariants(HM_HH_getChunkList(targetHH));
   ensureCallSanity(s, targetHH, cp);
   // At the end of collection, repList will contain all the chunks that have
@@ -952,23 +970,46 @@ void CC_collectWithRoots(
   // origList are added to the free list.
 
   uint32_t initialDepth = HM_HH_getDepth(targetHH);
+  cgc_process->initialDepth = initialDepth;
 
-  struct HM_chunkList _repList;
-  HM_chunkList repList = &(_repList);
-  HM_initChunkList(repList);
-  HM_chunkList origList = HM_HH_getChunkList(targetHH);
-
+  // V1: removing origList and repList as no longer needed, reusing origList in the sense of initial chunkList from targetHH
+  // struct HM_chunkList _repList;
+  // HM_chunkList repList = malloc(sizeof(struct HM_chunkList));
+  // HM_initChunkList(repList);
+  HM_chunkList origList = malloc(sizeof(struct HM_chunkList));
+  // orig list remains a chunklist
+  origList = HM_HH_getChunkList(targetHH);
   HM_assertChunkListInvariants(origList);
 
-  ConcurrentCollectArgs lists = {
-    .origList = origList,
-    .repList  = repList,
-    .toHead = (void*)repList,
-    .fromHead = (void*) &(origList),
-    .bytesSaved = 0,
-    .numObjectsMarked = 0
-  };
-  CC_workList_init(s, &(lists.worklist));
+  // ConcurrentCollectArgs lists = {
+  //   .origList = origList,
+  //   .repList  = repList,
+  //   .toHead = (void*)repList,
+  //   .fromHead = (void*) &(origList),
+  //   .bytesSaved = 0,
+  //   .numObjectsMarked = 0
+  // };
+
+  // might overflow with uint32_t
+  // KKG_TODO: push the id creation logic into a function and call it here - overflow check can be done inside this
+  const uint32_t parentHeapId = (s->procNumber+s->cumulativeStatistics->numCCs) * (s->procNumber+s->cumulativeStatistics->numCCs+1)/2 + s->cumulativeStatistics->numCCs;
+
+  ConcurrentCollectArgs *lists = malloc(sizeof(ConcurrentCollectArgs));
+  if (lists) {
+    // V1: Removing usage of lists
+    lists->origList = origList;
+    // lists->repList = repList;
+    // lists->toHead = (void*)repList;
+    // lists->fromHead = (void*) &(origList);
+    lists->bytesSaved = 0;
+    lists->numObjectsMarked = 0;
+    lists->parentHeapId = parentHeapId;
+  }
+  else {
+    DIE("lists malloc failed\n");
+  }
+  CC_workList_init(s, &(lists->worklist));
+  cgc_process->lists = lists;
 
   HH_EBR_enterQuiescentState(s);
 
@@ -986,8 +1027,13 @@ void CC_collectWithRoots(
         assert(0);
       }
 #endif
+
     assert(T->tmpHeap == NULL);
-    T->tmpHeap = lists.fromHead;
+    // T->tmpHeap = lists->fromHead; // setting every node in origList to fromHead flag
+    // V1 : setting live field to false initially
+    T->live = FALSE;
+    // V1: setting the parentHeapId to a unique number using the cantor pairing function
+    T->parentHeapId = (s->procNumber+s->cumulativeStatistics->numCCs) * (s->procNumber+s->cumulativeStatistics->numCCs+1)/2 + s->cumulativeStatistics->numCCs;
     T->levelHead = HM_HH_getUFNode(targetHH);
     assert(T->levelHead->representative == NULL);
     assert(T->levelHead->payload == targetHH);
@@ -1000,21 +1046,36 @@ void CC_collectWithRoots(
 
   // struct HM_chunkList pinnedChunks;
   // HM_initChunkList(&pinnedChunks);
-  CC_filterPinned(s, initialDepth, targetHH, lists.fromHead, lists.toHead);
+  CC_filterPinned(s, initialDepth, targetHH, lists->parentHeapId);
 
   struct HM_foreachDownptrClosure forwardPinnedClosure =
-    {.fun = forwardPinned, .env = (void*)&lists};
+    {.fun = forwardPinned, .env = (void*)lists};
   HM_foreachRemembered(s, HM_HH_getRemSet(targetHH), &forwardPinnedClosure, false);
 
   // forward closures, stack and deque?
-  forceForward(s, &(cp->snapLeft), &lists);
-  forceForward(s, &(cp->snapRight), &lists);
-  forceForward(s, &(cp->snapTemp), &lists);
-  // forceForward(s, &(s->wsQueue), &lists);
-  forceForward(s, &(cp->stack), &lists);
-  forceForward(s, &(cp->additionalStack), &lists);
+  // snap - additional heap objects registered as garbage collection roots in addition to the already exisiting roots
+  // multiple start nodes - identify all reachable nodes
+  forceForward(s, &(cp->snapLeft), lists);
+  forceForward(s, &(cp->snapRight), lists);
+  forceForward(s, &(cp->snapTemp), lists);
+  // forceForward(s, &(s->wsQueue), lists);
+  forceForward(s, &(cp->stack), lists);
+  forceForward(s, &(cp->additionalStack), lists);
 
-  markLoop(s, &lists);
+  return cgc_process;
+}
+
+bool isDone(GC_state s, CGC_process* cgc_process) {
+  CC_workList worklist = &(cgc_process->lists->worklist);
+  return CC_workList_isEmpty(s, worklist);
+}
+
+void finalizeCC(GC_state s,
+  HM_HierarchicalHeap targetHH,
+  __attribute__((unused)) GC_thread thread,
+  size_t *outputBytesSaved,
+  size_t *outputNumObjectsMarked,
+  CGC_process *cgc_process) {
 
   // JATIN_NOTE: This is important because the stack object of the thread we are collecting
   // often changes the level it is at. So it might in fact be at depth = 1.
@@ -1030,19 +1091,24 @@ void CC_collectWithRoots(
   HM_chunkList tempRemovedFromCCBag = &tempRemovedFromCCBag_;
   HM_initChunkList(tempRemovedFromCCBag);
 
+  ConcurrentPackage cp = cgc_process -> concurrent_package;
+  ConcurrentCollectArgs *lists = cgc_process -> lists;
+
+  // this is where we are checking if rootList is empty or not
+  // if not empty, keep doing marking until empty
   while (!CC_closeStack(cp, tempRemovedFromCCBag)) {
     forEachObjptrInCCStackBag(
       s,
       tempRemovedFromCCBag,
-      tryMarkAndMarkLoop,
-      &lists);
+      tryMarkAndMarkLoop, // V1: this needs to be fixed - several places where marking is called - handle parallelism in all cases
+      lists);
     HM_appendChunkList(removedFromCCBag, tempRemovedFromCCBag);
     HM_initChunkList(tempRemovedFromCCBag);
 
-    markLoop(s, &lists);
+    markLoop(s, lists);
   }
 
-  assert(CC_workList_isEmpty(s, &(lists.worklist)));
+  assert(CC_workList_isEmpty(s, &(lists->worklist))); // --> all of marking is done
   assert(NULL == tempRemovedFromCCBag->firstChunk);
 
   // saveNoForward(s, (void*)(thread->stack), &lists);
@@ -1064,26 +1130,26 @@ void CC_collectWithRoots(
 // #endif
 
   struct HM_foreachDownptrClosure unmarkPinnedClosure =
-    {.fun = unmarkPinned, .env = &lists};
+    {.fun = unmarkPinned, .env = lists};
   HM_foreachRemembered(s, HM_HH_getRemSet(targetHH), &unmarkPinnedClosure, false);
 
-  forceUnmark(s, &(cp->snapLeft), &lists);
-  forceUnmark(s, &(cp->snapRight), &lists);
-  forceUnmark(s, &(cp->snapTemp), &lists);
-  // forceUnmark(s, &(s->wsQueue), &lists);
-  forceUnmark(s, &(cp->stack), &lists);
-  forceUnmark(s, &(cp->additionalStack), &lists);
+  forceUnmark(s, &(cp->snapLeft), lists);
+  forceUnmark(s, &(cp->snapRight), lists);
+  forceUnmark(s, &(cp->snapTemp), lists);
+  // forceUnmark(s, &(s->wsQueue), lists);
+  forceUnmark(s, &(cp->stack), lists);
+  forceUnmark(s, &(cp->additionalStack), lists);
 
-  unmarkLoop(s, &lists);
+  unmarkLoop(s, lists);
 
-  // forEachObjptrinStack(s, cp->rootList, unmarkPtrChunk, &lists);
-  forEachObjptrInCCStackBag(s, removedFromCCBag, tryUnmarkAndUnmarkLoop, &lists);
-  unmarkLoop(s, &lists);
+  // forEachObjptrinStack(s, cp->rootList, unmarkPtrChunk, lists);
+  forEachObjptrInCCStackBag(s, removedFromCCBag, tryUnmarkAndUnmarkLoop, lists);
+  unmarkLoop(s, lists);
 
   HM_freeChunksInListWithInfo(s, removedFromCCBag, NULL, BLOCK_FOR_FORGOTTEN_SET);
 
-  assert(CC_workList_isEmpty(s, &(lists.worklist)));
-  CC_workList_free(s, &(lists.worklist));
+  assert(CC_workList_isEmpty(s, &(lists->worklist)));
+  CC_workList_free(s, &(lists->worklist));
 
 #if ASSERT2 // just contains code that is sometimes useful for debugging.
   HM_assertChunkListInvariants(origList);
@@ -1131,33 +1197,36 @@ void CC_collectWithRoots(
   }
 #endif
 
-  uint64_t bytesSaved =  HM_getChunkListUsedSize(repList);
-  uint64_t bytesScanned =  HM_getChunkListUsedSize(repList)
-                          + HM_getChunkListUsedSize(origList);
+  // V1: is it required to scan through the entire list and fetch this information?
+  // uint64_t bytesSaved =  HM_getChunkListUsedSize(cgc_process->lists->repList);
+  // uint64_t bytesScanned =  HM_getChunkListUsedSize(cgc_process->lists->repList)
+  //                         + HM_getChunkListUsedSize(cgc_process->lists->origList);
+  uint64_t bytesSaved = HM_getChunkListUsedSizeWithFilter(cgc_process->lists->origList, TRUE);
+  uint64_t bytesScanned = HM_getChunkListUsedSize(cgc_process->lists->origList);
 
   cp->bytesSurvivedLastCollection = bytesSaved;
   cp->bytesAllocatedSinceLastCollection = 0;
 
-  struct HM_chunkList _deleteList;
-  HM_chunkList deleteList = &(_deleteList);
-  HM_initChunkList(deleteList);
+  // struct HM_chunkList _deleteList;
+  // HM_chunkList deleteList = &(_deleteList);
+  // HM_initChunkList(deleteList);
 
-  HM_chunk chunk = HM_getChunkListFirstChunk(origList);
-  while (chunk!=NULL) {
-    HM_chunk tChunk = chunk->nextChunk;
-    chunk->levelHead = NULL;
-    chunk->tmpHeap  = NULL;
-    if(HM_getChunkSize(chunk) > 2 * (HM_BLOCK_SIZE)) {
-      HM_unlinkChunk(origList, chunk);
-      HM_appendChunk(deleteList, chunk);
-    }
-    chunk = tChunk;
-  }
+  // HM_chunk chunk = HM_getChunkListFirstChunk(cgc_process->lists->origList);
+  // while (chunk!=NULL) {
+  //   HM_chunk tChunk = chunk->nextChunk;
+  //   chunk->levelHead = NULL;
+  //   chunk->tmpHeap  = NULL;
+  //   if(HM_getChunkSize(chunk) > 2 * (HM_BLOCK_SIZE)) {
+  //     HM_unlinkChunk(cgc_process->lists->origList, chunk);
+  //     HM_appendChunk(deleteList, chunk);
+  //   }
+  //   chunk = tChunk;
+  // }
 
   uint32_t finalDepth = HM_HH_getDepth(targetHH);
 
   struct CC_chunkInfo info =
-    {.initialDepth = initialDepth,
+    {.initialDepth = cgc_process->initialDepth,
      .finalDepth = finalDepth,
      .procNum = s->procNumber,
      .freedType = CC_FREED_NORMAL_CHUNK};
@@ -1167,24 +1236,23 @@ void CC_collectWithRoots(
   /** SAM_NOTE: TODO: deleteList no longer needed, because
     * block allocator handles that.
     */
-  HM_freeChunksInListWithInfo(s, origList, &infoc, BLOCK_FOR_HEAP_CHUNK);
-  HM_freeChunksInListWithInfo(s, deleteList, &infoc, BLOCK_FOR_HEAP_CHUNK);
 
-  for(HM_chunk chunk = repList->firstChunk;
-    chunk!=NULL; chunk = chunk->nextChunk) {
-    chunk->tmpHeap = NULL;
-  }
+  // move non-live objects off the origlist to a replist, and then free one of the lists, similar to how it was done before
+  HM_freeNonLiveChunksInListWithInfo(s, cgc_process->lists->origList, &infoc, BLOCK_FOR_HEAP_CHUNK);
+  // HM_freeChunksInListWithInfo(s, deleteList, &infoc, BLOCK_FOR_HEAP_CHUNK);
 
   // HM_appendChunkList(repList, origList);
-  *(origList) = *(repList);
+  // *(cgc_process->lists->origList) = *(cgc_process->lists->repList);
 
+  // V1: what do we do about this section of code? because there is some unlinking that is happening from the origList
+  // also no more freeing after this at all, so why do this in the first place?
   HM_chunk stackChunk = HM_getChunkOf(objptrToPointer(cp->stack, NULL));
   assert(!(stackChunk->mightContainMultipleObjects));
-  assert(HM_HH_getChunkList(HM_getLevelHead(stackChunk)) == origList);
-  assert(isChunkInList(stackChunk, origList));
+  assert(HM_HH_getChunkList(HM_getLevelHead(stackChunk)) == cgc_process->lists->origList);
+  assert(isChunkInList(stackChunk, cgc_process->lists->origList));
   assert(bytesSaved >= HM_getChunkUsedSize(stackChunk));
   bytesSaved -= HM_getChunkUsedSize(stackChunk);
-  HM_unlinkChunk(origList, stackChunk);
+  HM_unlinkChunk(cgc_process->lists->origList, stackChunk);
   info.freedType = CC_FREED_STACK_CHUNK;
   HM_freeChunkWithInfo(s, stackChunk, &infoc, BLOCK_FOR_HEAP_CHUNK);
   info.freedType = CC_FREED_NORMAL_CHUNK;
@@ -1194,9 +1262,9 @@ void CC_collectWithRoots(
     HM_chunk aStackChunk =
       HM_getChunkOf(objptrToPointer(cp->additionalStack, NULL));
     assert(!(aStackChunk->mightContainMultipleObjects));
-    assert(HM_HH_getChunkList(HM_getLevelHead(aStackChunk)) == origList);
-    assert(isChunkInList(aStackChunk, origList));
-    HM_unlinkChunk(origList, aStackChunk);
+    assert(HM_HH_getChunkList(HM_getLevelHead(aStackChunk)) == cgc_process->lists->origList);
+    assert(isChunkInList(aStackChunk, cgc_process->lists->origList));
+    HM_unlinkChunk(cgc_process->lists->origList, aStackChunk);
     info.freedType = CC_FREED_STACK_CHUNK;
     HM_freeChunkWithInfo(s, aStackChunk, &infoc, BLOCK_FOR_HEAP_CHUNK);
     info.freedType = CC_FREED_NORMAL_CHUNK;
@@ -1216,28 +1284,90 @@ void CC_collectWithRoots(
     */
   HM_HH_freeAllDependants(s, targetHH, TRUE);
 
-  HM_assertChunkListInvariants(origList);
+  HM_assertChunkListInvariants(cgc_process->lists->origList);
 
-  timespec_now(&stopTime);
-  timespec_sub(&stopTime, &startTime);
-  timespec_add(&(s->cumulativeStatistics->timeCC), &stopTime);
-  s->cumulativeStatistics->numCCs++;
+  timespec_now(&cgc_process->stopTime);
+  timespec_sub(&cgc_process->stopTime, &cgc_process->startTime);
+  timespec_add(&(s->cumulativeStatistics->timeCC), &cgc_process->stopTime);
+  s->cumulativeStatistics->numCCs++; // V1: use as second field in id
   assert(bytesScanned >= bytesSaved);
   uintmax_t bytesReclaimed = bytesScanned-bytesSaved;
   s->cumulativeStatistics->bytesInScopeForCC += bytesScanned;
   s->cumulativeStatistics->bytesReclaimedByCC += bytesReclaimed;
 
   if (outputBytesSaved != NULL) {
-    *outputBytesSaved = lists.bytesSaved;
+    *outputBytesSaved = lists->bytesSaved;
   }
 
   if (outputNumObjectsMarked != NULL) {
-    *outputNumObjectsMarked = lists.numObjectsMarked;
+    *outputNumObjectsMarked = lists->numObjectsMarked;
   }
 
   Trace0(EVENT_CGC_LEAVE);
-  
-  return;
+}
+
+bool isSplittable(CGC_process *cgc_process) {
+  if(HM_getNumberOfChunksInChunkList(&cgc_process->lists->worklist.storage) > SPLIT_SIZE) {
+    return TRUE;
+  }
+  return FALSE;
+}
+
+CGC_process* splitWork(CGC_process *cgc_process) {
+  CGC_process* newProcess = malloc(sizeof(CGC_process));
+  ConcurrentCollectArgs* newLists = malloc(sizeof(ConcurrentCollectArgs));
+  if(newLists) {
+    newLists->origList = cgc_process->lists->origList; // new origList should point back to the old origList
+    newLists->bytesSaved = cgc_process->lists->bytesSaved;
+    newLists->numObjectsMarked = cgc_process->lists->numObjectsMarked;
+    newLists->parentHeapId = cgc_process->lists->parentHeapId;
+  }
+  else {
+    DIE("lists malloc failed\n");
+  }
+  newLists->worklist = *HM_splitChunkList(&cgc_process->lists->worklist);
+  newProcess->lists = newLists;
+
+  return newProcess;
+}
+
+// test
+void runCGC(GC_state s, CGC_process* cgc_process) {
+  while(true) {
+    if(isDone(s, cgc_process)) {
+      return;
+    }
+    if(isSplittable(cgc_process)) {
+      CGC_process* forked_cgc_process = splitWork(cgc_process);
+      runCGC(s, cgc_process);
+      runCGC(s, forked_cgc_process);
+      return;
+    }
+    markLoop(s, cgc_process->lists);
+  }
+}
+
+// refactoring this function
+void CC_collectWithRoots(
+  GC_state s,
+  HM_HierarchicalHeap targetHH,
+  __attribute__((unused)) GC_thread thread,
+  size_t *outputBytesSaved,
+  size_t *outputNumObjectsMarked)
+{
+
+  printf("start initializeCGC\n");
+  CGC_process* cgc_process = initializeCGC(
+    s, targetHH, thread);
+  printf("end initializeCGC\n");
+
+  printf("start runCGC\n");
+  runCGC(s, cgc_process);
+  printf("end runCGC\n");
+
+  printf("start finalizeCC\n");
+  finalizeCC(s, targetHH, thread, outputBytesSaved, outputNumObjectsMarked, cgc_process);
+  printf("end finalizeCC\n");
 }
 
 #endif

@@ -109,6 +109,8 @@ HM_chunk HM_initializeChunk(pointer start, pointer end) {
   chunk->decheckState = DECHECK_BOGUS_TID;
   chunk->retireChunk = FALSE;
   chunk->magic = CHUNK_MAGIC;
+  // V1: initialize parentId for a chunk here (set to -1)
+  chunk->parentHeapId = -1;
 
 #if ASSERT
   /* clear out memory to quickly catch some memory safety errors */
@@ -226,6 +228,24 @@ void HM_freeChunksInListWithInfo(
     chunk = next;
   }
   HM_initChunkList(list);
+}
+
+void HM_freeNonLiveChunksInListWithInfo(
+  GC_state s,
+  HM_chunkList list,
+  writeFreedBlockInfoFnClosure f,
+  enum BlockPurpose purpose)
+{
+  HM_chunk chunk = list->firstChunk;
+  while (chunk != NULL) {
+    HM_chunk next = chunk->nextChunk;
+    // V1: free chunks which are not live
+    if(chunk->live == FALSE) {
+      HM_unlinkChunk(list, chunk);
+      HM_freeChunkWithInfo(s, chunk, f, purpose);
+    }
+    chunk = next;
+  }
 }
 
 void HM_freeChunksInList(GC_state s, HM_chunkList list) {
@@ -479,6 +499,30 @@ size_t HM_getChunkListSize(HM_chunkList list) {
 size_t HM_getChunkListUsedSize(HM_chunkList list) {
   assert(list != NULL);
   return list->usedSize;
+}
+
+uint32_t HM_getNumberOfChunksInChunkList(HM_chunkList list) {
+  uint32_t count = 0;
+  HM_chunk chunk = HM_getChunkListFirstChunk(list);
+  while(chunk != NULL) {
+    HM_chunk tmp = chunk->nextChunk;
+    count++;
+    chunk = tmp;
+  }
+  return count;
+}
+
+size_t HM_getChunkListUsedSizeWithFilter(HM_chunkList list, bool filter) {
+  HM_chunk chunk = HM_getChunkListFirstChunk(list);
+  size_t usedSize = 0;
+  while (chunk!=NULL) {
+    HM_chunk tChunk = chunk->nextChunk;
+    if(chunk->live == filter) {
+      usedSize += HM_getChunkUsedSize(chunk);
+    }
+    chunk = tChunk;
+  }
+  return usedSize;
 }
 
 pointer HM_storeInChunkListWithPurpose(HM_chunkList chunkList, void* p, size_t objSize, enum BlockPurpose purpose) {

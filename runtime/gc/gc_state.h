@@ -71,7 +71,7 @@ struct GC_state {
   size_t numberDisentanglementChecks;  /** TODO: remove. now in cumulativeStatistics */
   GC_objectType objectTypes; /* Array of object types. */
   uint32_t objectTypesLength; /* Cardinality of objectTypes array. */
-  int32_t procNumber;
+  int32_t procNumber; // V1: can use for id
   /* States for each processor */
   GC_state procStates;
   struct GC_profiling profiling;

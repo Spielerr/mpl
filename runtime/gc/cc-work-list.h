@@ -44,6 +44,7 @@ bool CC_workList_isEmpty(GC_state s, CC_workList w);
 void CC_workList_init(GC_state s, CC_workList w);
 void CC_workList_free(GC_state s, CC_workList w);
 void CC_workList_push(GC_state s, CC_workList w, objptr op);
+CC_workList HM_splitChunkList(CC_workList workList);
 
 /** Returns a single field of an object that still needs to be traced.
   * So, note that a single push can result in many pops.

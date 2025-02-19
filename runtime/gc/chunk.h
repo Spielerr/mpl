@@ -72,6 +72,9 @@ struct HM_chunk {
   bool retireChunk;
 
   bool mightContainMultipleObjects;
+    // V1: add a parentHeapId to keep track of which heap the chunk falls under
+  bool live;
+  uint32_t parentHeapId;
   void* tmpHeap;
 
   SuperBlock container;
@@ -165,6 +168,7 @@ void HM_freeChunksInList(GC_state s, HM_chunkList list);
 
 void HM_freeChunkWithInfo(GC_state s, HM_chunk chunk, writeFreedBlockInfoFnClosure f, enum BlockPurpose purpose);
 void HM_freeChunksInListWithInfo(GC_state s, HM_chunkList list, writeFreedBlockInfoFnClosure f, enum BlockPurpose purpose);
+void HM_freeNonLiveChunksInListWithInfo(GC_state s, HM_chunkList list, writeFreedBlockInfoFnClosure f, enum BlockPurpose purpose);
 
 // void HM_deleteChunks(GC_state s, HM_chunkList deleteList);
 void HM_appendChunkList(HM_chunkList destinationChunkList, HM_chunkList chunkList);
@@ -279,6 +283,7 @@ pointer HM_storeInchunkListWithPurpose(HM_chunkList chunkList, void* p, size_t o
  */
 HM_chunk HM_getChunkListLastChunk(HM_chunkList chunkList);
 HM_chunk HM_getChunkListFirstChunk(HM_chunkList chunkList);
+uint32_t HM_getNumberOfChunksInChunkList(HM_chunkList chunkList);
 
 size_t HM_getChunkListSize(HM_chunkList list);
 size_t HM_getChunkListUsedSize(HM_chunkList list);

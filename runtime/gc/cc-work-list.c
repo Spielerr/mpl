@@ -162,6 +162,42 @@ void CC_workList_push(
   return;
 }
 
+CC_workList HM_splitChunkList(CC_workList workList) {
+  HM_chunkList list = &workList->storage;
+  size_t originalSize = list->size;
+  size_t originalUsedSize = list->usedSize;
+  size_t firstHalfSize = 0;
+  size_t firstHalfUsedSize = 0;
+
+  HM_chunk lastChunk = HM_getChunkListLastChunk(list);
+  HM_chunkList newList = malloc(sizeof(struct HM_chunkList));
+  HM_chunk fastChunk = HM_getChunkListFirstChunk(list);
+  HM_chunk slowChunk = HM_getChunkListFirstChunk(list);
+  HM_chunk prevSlowChunk = NULL;
+  while(fastChunk != NULL && fastChunk->nextChunk != NULL) {
+    fastChunk = fastChunk->nextChunk->nextChunk;
+    prevSlowChunk = slowChunk;
+    firstHalfSize += HM_getChunkSize(slowChunk);
+    firstHalfUsedSize += HM_getChunkUsedSize(slowChunk);
+    slowChunk = slowChunk->nextChunk;
+  }
+
+  if(prevSlowChunk != NULL) {
+    prevSlowChunk->nextChunk = NULL;
+  }
+  workList->currentChunk = prevSlowChunk;
+
+  newList->firstChunk = slowChunk;
+  newList->lastChunk = lastChunk;
+  newList->size = originalSize - firstHalfSize;
+  newList->usedSize = originalUsedSize - firstHalfUsedSize;
+
+  CC_workList newWorkList = malloc(sizeof(struct CC_workList));
+  newWorkList->storage = *newList;
+  newWorkList->currentChunk = lastChunk;
+  return newWorkList;
+}
+
 
 struct advanceOneFieldResult {
   objptr* field;

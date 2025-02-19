@@ -29,6 +29,7 @@ typedef struct ConcurrentCollectArgs {
   void* fromHead;
   size_t bytesSaved;
 	size_t numObjectsMarked;
+    uint32_t parentHeapId;
 } ConcurrentCollectArgs;
 
 
@@ -65,6 +66,14 @@ typedef struct ConcurrentPackage {
   // struct HM_chunkList remSet;
 
 } * ConcurrentPackage;
+
+typedef struct CGC_process {
+    ConcurrentCollectArgs* lists;
+    ConcurrentPackage concurrent_package;
+    uint32_t initialDepth;
+    struct timespec startTime;
+    struct timespec stopTime;
+} CGC_process;
 
 #else
 
