@@ -23,6 +23,13 @@ structure GCState =
       val gcState = _prim "GC_state": unit -> t;
    end
 
+(* structure CGC_process =
+   struct
+      type t = Pointer.t
+
+      val cgc_process = _import "CGC_process": unit -> t;
+   end *)
+
 val bug = _prim "MLton_bug": String8.string -> unit;
 val eq = _prim "MLton_eq": 'a * 'a -> bool;
 val equal = _prim "MLton_equal": 'a * 'a -> bool;
@@ -378,6 +385,18 @@ structure Thread =
         GCState.t * thread * Word64.word -> unit;
       val resetList: thread -> unit =  _import "HM_HH_resetList" runtime private: thread -> unit;
       val collectThreadRoot = _import "CC_collectAtRoot" runtime private: thread * Word64.word -> unit;
+
+
+      (* type gcstate = MLton.Pointer.t
+      val gcstate = _prim "GC_state": unit -> gcstate; *)
+
+      (* type CGC_process = MLton.Pointer.t *)
+      (* val initializeCGC = _import "initializeCGC" runtime private: thread * Word64.word -> CGC_process.t;
+      val finalize_CC = _import "finalizeCC" runtime private: thread * Word64.word * CGC_process.t -> unit;
+      val isDone = _import "isDone" runtime private: (GCState.t * CGC_process.t) -> bool;
+      val isSplittable = _import "isSplittable" runtime private: CGC_process.t -> bool;
+      val splitWork = _import "splitWork" runtime private: CGC_process.t -> CGC_process.t;
+      val doWork = _import "doWork" runtime private: GCState.t * CGC_process.t -> unit; *)
 
       val getDepth = _import "GC_HH_getDepth" runtime private: thread -> Word32.word;
       val getRoot = _import "HM_HH_getRoot" runtime private: thread -> Word64.word;

@@ -73,6 +73,9 @@ typedef struct CGC_process {
     uint32_t initialDepth;
     struct timespec startTime;
     struct timespec stopTime;
+    size_t live;
+    size_t numObjectsMarked;
+    size_t beforeSize;
 } CGC_process;
 
 #else
@@ -100,14 +103,14 @@ PRIVATE void GC_updateObjectHeader(GC_state s, pointer p, GC_header newHeader);
 // in the chunk is live then the whole chunk is. However, tracing is at the granularity of objects.
 // Objects in chunks that are preserved may point to chunks that are not. But such objects aren't
 // reachable.
-void CC_collectWithRoots(
-	GC_state s,
-	struct HM_HierarchicalHeap * targetHH,
-	GC_thread thread,
-	size_t *bytesSaved,
-	size_t *numObjectsMarked);
+// void CC_collectWithRoots(
+// 	GC_state s,
+// 	struct HM_HierarchicalHeap * targetHH,
+// 	GC_thread thread,
+// 	size_t *bytesSaved,
+// 	size_t *numObjectsMarked);
 	
-void CC_collectAtPublicLevel(GC_state s, GC_thread thread, uint32_t depth);
+// void CC_collectAtPublicLevel(GC_state s, GC_thread thread, uint32_t depth);
 void CC_addToStack(GC_state s, ConcurrentPackage cp, pointer p);
 void CC_initStack(GC_state s, ConcurrentPackage cp);
 

@@ -7,7 +7,8 @@
  * Implementation of the concurrent collection interface
  */
 #include "concurrent-collection.h"
-#define SPLIT_SIZE 5
+#define SPLIT_SIZE 1
+#define K 10
 
 
 
@@ -372,6 +373,7 @@ void markLoop(GC_state s, ConcurrentCollectArgs* args) {
   CC_workList worklist = &(args->worklist);
 
   objptr* current = CC_workList_pop(s, worklist);
+  // exit after k amounts of work done instead of exhausting the entire worklist
   while (NULL != current) {
     callIfIsObjptr(s, &markAddClosure, current);
     current = CC_workList_pop(s, worklist);
@@ -379,6 +381,25 @@ void markLoop(GC_state s, ConcurrentCollectArgs* args) {
 
   assert(CC_workList_isEmpty(s, worklist));
 }
+
+// Returns number of items processed
+int markLoop2(GC_state s, ConcurrentCollectArgs* args, int limit) {
+  struct GC_foreachObjptrClosure markAddClosure =
+    {.fun = tryMarkAndAddToWorkList, .env = (void*)args};
+
+  CC_workList worklist = &(args->worklist);
+  int processed = 0;
+
+  objptr* current = CC_workList_pop(s, worklist);
+  while (NULL != current && processed < limit) {
+    callIfIsObjptr(s, &markAddClosure, current);
+    current = CC_workList_pop(s, worklist);
+    processed++;
+  }
+
+  // return processed;
+}
+
 
 void unmarkLoop(GC_state s, ConcurrentCollectArgs* args) {
   struct GC_foreachObjptrClosure unmarkAddClosure =
@@ -646,56 +667,6 @@ bool claimHeap(HM_HierarchicalHeap heap) {
   return TRUE;
 }
 
-void CC_collectAtRoot(pointer threadp, pointer hhp) {
-  GC_state s = pthread_getspecific (gcstate_key);
-  GC_thread thread = threadObjptrToStruct(s, pointerToObjptr(threadp, NULL));
-  HM_HierarchicalHeap heap = (HM_HierarchicalHeap)hhp;
-
-  if (!checkLocalScheduler(s) || thread->currentDepth<=0) {
-    return;
-  }
-
-  if (!claimHeap(heap)) {
-    return;
-  }
-
-  // for exiting even if CC is going on.
-  assert(NULL == s->currentCCTargetHH);
-  s->currentCCTargetHH = heap;
-  // assert(!s->amInCC);
-  // s->amInCC = TRUE;
-
-#if ASSERT
-  for (int other = 0; other < (int)s->numberOfProcs; other++) {
-    if (other != s->procNumber)
-      assert(heap != s->procStates[other].currentCCTargetHH);
-  }
-#endif
-
-  size_t beforeSize = HM_getChunkListSize(HM_HH_getChunkList(heap));
-  size_t live = 0;
-  size_t numObjectsMarked = 0;
-  CC_collectWithRoots(s, heap, thread, &live, &numObjectsMarked);
-  size_t afterSize = HM_getChunkListSize(HM_HH_getChunkList(heap));
-
-  size_t diff = beforeSize > afterSize ? beforeSize - afterSize : 0;
-
-  LOG(LM_CC_COLLECTION, LL_INFO,
-    "finished at depth %u. before: %zu after: %zu (-%.01lf%%) live: %zu (%.01lf%% fragmented) objects: %zu",
-    heap->depth,
-    beforeSize,
-    afterSize,
-    100.0 * ((double)diff / (double)beforeSize),
-    live,
-    100.0 * (1.0 - (double)live / (double)afterSize),
-    numObjectsMarked);
-
-  // HM_HH_getConcurrentPack(heap)->ccstate = CC_UNREG;
-  __atomic_store_n(&(HM_HH_getConcurrentPack(heap)->ccstate), CC_DONE, __ATOMIC_SEQ_CST);
-  // s->amInCC = FALSE;
-  s->currentCCTargetHH = NULL;
-}
-
 uint32_t minPrivateLevel(GC_state s) {
   uint64_t topval = *(uint64_t*)objptrToPointer(s->wsQueueTop, NULL);
   uint32_t shallowestPrivateLevel = UNPACK_IDX(topval);
@@ -703,32 +674,32 @@ uint32_t minPrivateLevel(GC_state s) {
   return level;
 }
 
-void CC_collectAtPublicLevel(GC_state s, GC_thread thread, uint32_t depth) {
-  checkLocalScheduler(s);
-  if (thread->currentDepth <= 1
-    || depth <= 0
-    || depth >= thread->currentDepth
-    // Don't collect heaps that are private
-    || depth > minPrivateLevel(s)
-    ) {
-    return;
-  }
-
-  HM_HierarchicalHeap heap = findHeap(thread, depth);
-  if(!claimHeap(heap)){
-    return;
-  }
-
-  // collect only if the heap is above a threshold size
-  if (HM_getChunkListSize(&(heap->chunkList)) >= 2 * HM_BLOCK_SIZE) {
-    assert(getThreadCurrent(s) == thread);
-    CC_collectWithRoots(s, heap, thread, NULL, NULL);
-  }
-
-  // Mark that collection is complete
-  __atomic_store_n(&(HM_HH_getConcurrentPack(heap)->ccstate), CC_DONE, __ATOMIC_SEQ_CST);
-  // HM_HH_getConcurrentPack(heap)->ccstate = CC_UNREG;
-}
+// void CC_collectAtPublicLevel(GC_state s, GC_thread thread, uint32_t depth) {
+//   checkLocalScheduler(s);
+//   if (thread->currentDepth <= 1
+//     || depth <= 0
+//     || depth >= thread->currentDepth
+//     // Don't collect heaps that are private
+//     || depth > minPrivateLevel(s)
+//     ) {
+//     return;
+//   }
+//
+//   HM_HierarchicalHeap heap = findHeap(thread, depth);
+//   if(!claimHeap(heap)){
+//     return;
+//   }
+//
+//   // collect only if the heap is above a threshold size
+//   if (HM_getChunkListSize(&(heap->chunkList)) >= 2 * HM_BLOCK_SIZE) {
+//     assert(getThreadCurrent(s) == thread);
+//     CC_collectWithRoots(s, heap, thread, NULL, NULL);
+//   }
+//
+//   // Mark that collection is complete
+//   __atomic_store_n(&(HM_HH_getConcurrentPack(heap)->ccstate), CC_DONE, __ATOMIC_SEQ_CST);
+//   // HM_HH_getConcurrentPack(heap)->ccstate = CC_UNREG;
+// }
 
 /* ========================================================================= */
 
@@ -942,11 +913,45 @@ void CC_filterDownPointers(GC_state s, HM_chunkList x, HM_HierarchicalHeap hh){
 #endif
 
 
-CGC_process* initializeCGC(GC_state s,
-  HM_HierarchicalHeap targetHH,
-  __attribute__((unused)) GC_thread thread) {
+CGC_process* initializeCGC(
+  pointer threadp, 
+  pointer hhp) {
+
+  printf("Initializing CGC\n");
+
+  GC_state s = pthread_getspecific (gcstate_key);
+  GC_thread thread = threadObjptrToStruct(s, pointerToObjptr(threadp, NULL));
+  HM_HierarchicalHeap targetHH = (HM_HierarchicalHeap)hhp;
+
+  if (!checkLocalScheduler(s) || thread->currentDepth<=0) {
+    return NULL;
+  }
+
+  if (!claimHeap(targetHH)) {
+    return NULL;
+  }
+
+  // for exiting even if CC is going on.
+  assert(NULL == s->currentCCTargetHH);
+  s->currentCCTargetHH = targetHH;
+  // assert(!s->amInCC);
+  // s->amInCC = TRUE;
+
+#if ASSERT
+  for (int other = 0; other < (int)s->numberOfProcs; other++) {
+    if (other != s->procNumber)
+      assert(targetHH != s->procStates[other].currentCCTargetHH);
+  }
+#endif
+
+  // size_t beforeSize = HM_getChunkListSize(HM_HH_getChunkList(heap));
+
+  // ------------------------------------------------------------------------------------
 
   CGC_process* cgc_process = malloc(sizeof(CGC_process));
+  cgc_process->live = 0;
+  cgc_process->numObjectsMarked = 0;
+  cgc_process->beforeSize = HM_getChunkListSize(HM_HH_getChunkList(targetHH));
 
   getStackCurrent(s)->used = sizeofGCStateCurrentStackUsed(s);
   getThreadCurrent(s)->exnStack = s->exnStack;
@@ -1070,12 +1075,15 @@ bool isDone(GC_state s, CGC_process* cgc_process) {
   return CC_workList_isEmpty(s, worklist);
 }
 
-void finalizeCC(GC_state s,
-  HM_HierarchicalHeap targetHH,
-  __attribute__((unused)) GC_thread thread,
-  size_t *outputBytesSaved,
-  size_t *outputNumObjectsMarked,
+void finalizeCC(pointer threadp, 
+  pointer hhp,
   CGC_process *cgc_process) {
+
+  GC_state s = pthread_getspecific (gcstate_key);
+  HM_HierarchicalHeap targetHH = (HM_HierarchicalHeap)hhp;
+  
+
+  //-----------------------------------------------------------------------------------------------------
 
   // JATIN_NOTE: This is important because the stack object of the thread we are collecting
   // often changes the level it is at. So it might in fact be at depth = 1.
@@ -1295,25 +1303,45 @@ void finalizeCC(GC_state s,
   s->cumulativeStatistics->bytesInScopeForCC += bytesScanned;
   s->cumulativeStatistics->bytesReclaimedByCC += bytesReclaimed;
 
-  if (outputBytesSaved != NULL) {
-    *outputBytesSaved = lists->bytesSaved;
-  }
-
-  if (outputNumObjectsMarked != NULL) {
-    *outputNumObjectsMarked = lists->numObjectsMarked;
-  }
+  cgc_process->live = lists->bytesSaved;
+  cgc_process->numObjectsMarked = lists->numObjectsMarked;
 
   Trace0(EVENT_CGC_LEAVE);
+
+  //--------------------------------------------------------------------------------
+
+  size_t afterSize = HM_getChunkListSize(HM_HH_getChunkList(targetHH));
+
+  size_t diff = cgc_process->beforeSize > afterSize ? cgc_process->beforeSize - afterSize : 0;
+
+  LOG(LM_CC_COLLECTION, LL_INFO,
+    "finished at depth %u. before: %zu after: %zu (-%.01lf%%) live: %zu (%.01lf%% fragmented) objects: %zu",
+    targetHH->depth,
+    cgc_process->beforeSize,
+    afterSize,
+    100.0 * ((double)diff / (double)cgc_process->beforeSize),
+    cgc_process->live,
+    100.0 * (1.0 - (double)(cgc_process->live) / (double)afterSize),
+    cgc_process->numObjectsMarked);
+
+  // HM_HH_getConcurrentPack(heap)->ccstate = CC_UNREG;
+  __atomic_store_n(&(HM_HH_getConcurrentPack(targetHH)->ccstate), CC_DONE, __ATOMIC_SEQ_CST);
+  // s->amInCC = FALSE;
+  s->currentCCTargetHH = NULL;
+
 }
 
 bool isSplittable(CGC_process *cgc_process) {
   if(HM_getNumberOfChunksInChunkList(&cgc_process->lists->worklist.storage) > SPLIT_SIZE) {
+    printf("worklist is splittable\n");
     return TRUE;
   }
+  printf("not splittable\n");
   return FALSE;
 }
 
 CGC_process* splitWork(CGC_process *cgc_process) {
+  printf("worklist is getting split\n");
   CGC_process* newProcess = malloc(sizeof(CGC_process));
   ConcurrentCollectArgs* newLists = malloc(sizeof(ConcurrentCollectArgs));
   if(newLists) {
@@ -1331,42 +1359,91 @@ CGC_process* splitWork(CGC_process *cgc_process) {
   return newProcess;
 }
 
+void doWork(GC_state s, CGC_process *cgc_process) {
+  markLoop2(s, cgc_process->lists, K);
+}
+
 // test
-void runCGC(GC_state s, CGC_process* cgc_process) {
+void runCGC(CGC_process* cgc_process) {
+  // KKG_TODO: make s static?
+  GC_state s = pthread_getspecific (gcstate_key);
   while(true) {
     if(isDone(s, cgc_process)) {
       return;
     }
     if(isSplittable(cgc_process)) {
+      printf("Worklist big enough to be split\n");
       CGC_process* forked_cgc_process = splitWork(cgc_process);
-      runCGC(s, cgc_process);
-      runCGC(s, forked_cgc_process);
+      runCGC(cgc_process);
+      runCGC(forked_cgc_process);
       return;
     }
-    markLoop(s, cgc_process->lists);
+    // create a wrapper which just uses cgc_process and use it as the sole interface object.
+    doWork(s, cgc_process);
+    // markLoop(s, cgc_process->lists); // doWork function - does k units of work on the markLoop and then splits up the rest of the remaining worklist - implementing the dfs paper
   }
 }
 
-// refactoring this function
-void CC_collectWithRoots(
-  GC_state s,
-  HM_HierarchicalHeap targetHH,
-  __attribute__((unused)) GC_thread thread,
-  size_t *outputBytesSaved,
-  size_t *outputNumObjectsMarked)
-{
+// void runCGC2(CGC_process* cgc_process) {
+//   GC_state s = pthread_getspecific(gcstate_key);
+//   int workDone = 0; // Track total work done locally
+//   // const int D = 256; // Polling frequency
+//   const int K = 1024; // Granularity control
+//
+//   while(true) {
+//     if(isDone(s, cgc_process)) {
+//       return;
+//     }
+//
+//     if(isWorklistEmpty(cgc_process)) {
+//       if(!acquireWorkFromOthers(cgc_process)) {
+//         if(globalWorkComplete()) {
+//           return;
+//         }
+//         continue; // Keep trying to get work
+//       }
+//     }
+//
+//     if(hasIncomingQuery()) {
+//       int worklistSize = getWorklistSize(cgc_process);
+//       if((worklistSize > K) || (workDone > K && worklistSize > 1)) {
+//         CGC_process* forked_cgc_process = splitWork(cgc_process);
+//         workDone = 0;
+//         replyToQuery(forked_cgc_process);
+//       } else {
+//         rejectQuery();
+//       }
+//     }
+//
+//     // Do a limited amount of work
+//     int itemsProcessed = markLoop2(s, cgc_process, K);
+//     workDone += itemsProcessed;
+//
+//     // If the worklist is still not empty, continue processing
+//     // Otherwise, the next iteration will try to acquire more work
+//   }
+// }
 
+
+uint64_t CGC_getWorkLists(CGC_process* cgc_process) {
+  return (uint64_t)(cgc_process->lists);
+}
+
+// refactoring this function
+void CC_collectAtRoot(
+  pointer threadp, pointer hhp)
+{
   printf("start initializeCGC\n");
   CGC_process* cgc_process = initializeCGC(
-    s, targetHH, thread);
+    threadp, hhp);
   printf("end initializeCGC\n");
 
   printf("start runCGC\n");
-  runCGC(s, cgc_process);
+  runCGC(cgc_process);
   printf("end runCGC\n");
 
   printf("start finalizeCC\n");
-  finalizeCC(s, targetHH, thread, outputBytesSaved, outputNumObjectsMarked, cgc_process);
+  finalizeCC(threadp, hhp, cgc_process);
   printf("end finalizeCC\n");
 }
 

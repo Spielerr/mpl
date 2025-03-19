@@ -43,6 +43,57 @@ struct
 
   type gcstate = MLton.Pointer.t
   val gcstate = _prim "GC_state": unit -> gcstate;
+  structure Thread = MLton.Thread.Basic
+
+  type CGC_process = MLton.Pointer.t
+  val CGC_process = _import "CGC_process": unit -> CGC_process;
+
+  type CGC_process = MLton.Pointer.t
+  val initializeCGC = _import "initializeCGC" runtime private: Thread.t * Word64.word -> CGC_process;
+  val finalize_CC = _import "finalizeCC" runtime private: Thread.t * Word64.word * CGC_process -> unit;
+  val isDone = _import "isDone" runtime private: (gcstate * CGC_process) -> bool;
+  val isSplittable = _import "isSplittable" runtime private: CGC_process -> bool;
+  val splitWork = _import "splitWork" runtime private: CGC_process -> CGC_process;
+  val doWork = _import "doWork" runtime private: gcstate * CGC_process -> unit;
+
+  (* fun collectThreadRoot_sml (t: MLton.Thread.t, hh: Word64.word) =
+    HH.collectThreadRoot(t, hh) *)
+
+  fun runCGC (cgc_process: CGC_process) =
+  let
+    fun loop proc =
+      let 
+        val _ = print ("runCGC loop start\n")
+        val s = gcstate ()
+      in
+        if isDone (s, proc) then
+          (print "isDone=true, exiting\n"; ())
+        else if isSplittable proc then
+          let 
+            val _ = print "isSplittable=true, splitting work\n"
+            val forked = splitWork proc
+          in
+            loop proc;
+            loop forked
+          end
+        else 
+          (print "Processing work...\n";
+           doWork (s, cgc_process);
+           loop proc)
+      end
+  in
+    print "Starting runCGC...\n";
+    loop cgc_process;
+    print "Finished runCGC\n"
+  end
+
+  fun collectThreadRoot_sml (threadp, hhp) =
+  let
+    val cgc_process = initializeCGC (threadp, hhp)
+  in
+    runCGC cgc_process;
+    finalize_CC (threadp, hhp, cgc_process)
+  end
 
   val getHeartbeatMicroseconds =
     _import "GC_getHeartbeatMicroseconds" runtime private: gcstate -> Word32.word;
@@ -84,7 +135,7 @@ struct
   val traceSchedJoinFast = _import "GC_Trace_schedJoinFast" private: gcstate -> unit; o gcstate
 
   structure Queue = DequeABP (*ArrayQueue*)
-  structure Thread = MLton.Thread.Basic
+  (* structure Thread = MLton.Thread.Basic *)
 
   val pcall = _prim "PCall":
     ('a -> 'b)      (* left side *)
@@ -729,6 +780,7 @@ struct
       end
 
 
+    (* is it possible to assign the cgc task here directly? *)
     fun maybeSpawnFunc {allowCGC: bool} (g: unit -> 'a) : 'a joinpoint option =
       let
         val depth = HH.getDepth (Thread.current ())
@@ -1163,16 +1215,16 @@ struct
             ; traceSchedWorkEnter ()
             ; IdleTimer.stop ()
             ; WorkTimer.start ()
-            ; HH.collectThreadRoot (thread, !hh)
+            ; collectThreadRoot_sml (thread, !hh) (* should be able to execute any arbitrary code - set up a new task thread and have it execute this collectatroot code *)
             (* ; print ("afterReturnToSched: done with GC\n") *)
-            ; case pop () of
+            ; case pop () of (* queue might just be empty after being done with the cgc task*)
                 NONE =>
                   ( WorkTimer.stop ()
                   ; IdleTimer.start ()
                   ; traceSchedWorkLeave ()
                   ; traceSchedIdleEnter ()
                   )
-              | SOME (Continuation (thread, _)) =>
+              | SOME (Continuation (thread, _)) => (* back to taskthread in the scheduler queue *)
                   ( ()
                   ; dbgmsg'' (fn _ => "resume task thread")
                   ; Thread.atomicBegin ()
@@ -1201,7 +1253,7 @@ struct
               ; traceSchedWorkEnter ()
               ; IdleTimer.stop ()
               ; WorkTimer.start ()
-              ; HH.collectThreadRoot (thread, !hh)
+              ; collectThreadRoot_sml (thread, !hh)
               ; WorkTimer.stop ()
               ; IdleTimer.start ()
               ; traceSchedWorkLeave ()
