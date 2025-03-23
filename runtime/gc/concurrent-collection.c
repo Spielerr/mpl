@@ -367,6 +367,7 @@ void tryUnmarkAndAddToWorkList(
 }
 
 void markLoop(GC_state s, ConcurrentCollectArgs* args) {
+  printf("marking loop\n");
   struct GC_foreachObjptrClosure markAddClosure =
     {.fun = tryMarkAndAddToWorkList, .env = (void*)args};
 
@@ -384,6 +385,7 @@ void markLoop(GC_state s, ConcurrentCollectArgs* args) {
 
 // Returns number of items processed
 int markLoop2(GC_state s, ConcurrentCollectArgs* args, int limit) {
+  printf("marking loop 2******************\n");
   struct GC_foreachObjptrClosure markAddClosure =
     {.fun = tryMarkAndAddToWorkList, .env = (void*)args};
 
@@ -418,7 +420,7 @@ void unmarkLoop(GC_state s, ConcurrentCollectArgs* args) {
 
 void tryMarkAndMarkLoop(GC_state s, objptr *opp, objptr op, void* rawArgs) {
   tryMarkAndAddToWorkList(s, opp, op, rawArgs);
-  markLoop(s, rawArgs);
+  // markLoop(s, rawArgs);
 }
 
 void tryUnmarkAndUnmarkLoop(GC_state s, objptr *opp, objptr op, void* rawArgs) {
@@ -581,7 +583,7 @@ void forceForward(GC_state s, objptr *opp, void* rawArgs) {
   }
 
   CC_workList_push(s, &(args->worklist), op);
-  markLoop(s, rawArgs);
+  // markLoop(s, rawArgs);
 }
 
 void forceUnmark (GC_state s, objptr* opp, void* rawArgs) {
@@ -1336,6 +1338,7 @@ bool isSplittable(CGC_process *cgc_process) {
     printf("worklist is splittable\n");
     return TRUE;
   }
+  printf("worklist chunk size: %lu\n", HM_getChunkListUsedSize(&cgc_process->lists->worklist.storage));
   printf("not splittable\n");
   return FALSE;
 }
@@ -1360,6 +1363,7 @@ CGC_process* splitWork(CGC_process *cgc_process) {
 }
 
 void doWork(GC_state s, CGC_process *cgc_process) {
+  printf("does some work\n");
   markLoop2(s, cgc_process->lists, K);
 }
 
@@ -1369,6 +1373,7 @@ void runCGC(CGC_process* cgc_process) {
   GC_state s = pthread_getspecific (gcstate_key);
   while(true) {
     if(isDone(s, cgc_process)) {
+      printf("worklist empty\n");
       return;
     }
     if(isSplittable(cgc_process)) {

@@ -97,6 +97,8 @@ val _ = print ("repeat " ^ Int.toString repeat ^ "\n")
 
 val alist_string = ref ""
 
+(* val tmp = List.tabulate (1000000, fn i => i) *)
+
 val _ = Util.for (0, repeat) (fn _ =>
   let
     val (result, tm) = Util.getTime (fn _ =>
@@ -119,3 +121,5 @@ val _ = Util.for (0, repeat) (fn _ =>
   end)
 
 val _ = if doPrint then print (!alist_string) else ()
+
+(*val _ = print (Int.toString (List.nth (tmp, 42)) ^ "\n")*)
