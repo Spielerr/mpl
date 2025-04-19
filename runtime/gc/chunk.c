@@ -512,6 +512,60 @@ uint32_t HM_getNumberOfChunksInChunkList(HM_chunkList list) {
   return count;
 }
 
+uint32_t HM_getNumberOfWorklistElemsInChunk(HM_chunk chunk) {
+  //printf("chunk used size: %lu", HM_getChunkUsedSize(chunk));
+  //printf("size of worklist elem: %d", 5);
+  uint32_t size = HM_getChunkUsedSize(chunk);
+  uint32_t ans = size/sizeof(struct CC_workList_elem);
+  return ans;
+}
+
+uint32_t HM_getNumberOfWorklistElemsInChunkList(HM_chunkList list) {
+  //printf("chunklist size: %lu", HM_getChunkListUsedSize(list));
+  uint32_t count = 0;
+  HM_chunk chunk = HM_getChunkListFirstChunk(list);
+  while (chunk != NULL) {
+    HM_chunk tmp = chunk->nextChunk;
+    count += HM_getNumberOfWorklistElemsInChunk(chunk);
+    chunk = tmp;
+  }
+  return count;
+}
+
+uint32_t HM_getNumberOfObjPtrsInWorkList(GC_state s, HM_chunkList list) {
+  HM_chunk currentChunk = HM_getChunkListFirstChunk(list);
+  uint32_t totalObjPtrs = 0;
+
+  while (currentChunk != NULL) {
+    pointer chunkFrontier = HM_getChunkFrontier(currentChunk);
+    pointer chunkStart = HM_getChunkStart(currentChunk);
+    pointer elemPtr = chunkFrontier - sizeof(struct CC_workList_elem);
+
+    int numOfWorklistElems = (chunkFrontier - chunkStart)/sizeof(struct CC_workList_elem);
+    int i = numOfWorklistElems - 1;
+
+    while (elemPtr >= chunkStart && i >= 0) {
+      CC_workList_elem elem = (CC_workList_elem)elemPtr;
+
+      pointer p = objptrToPointer(elem->op, NULL);
+
+      // inspect the object
+      GC_header header;
+      uint16_t bytesNonObjptrs;
+      uint16_t numObjptrs;
+      GC_objectTypeTag tag;
+      header = getHeader(p);
+      splitHeader(s, header, &tag, NULL, &bytesNonObjptrs, &numObjptrs);
+
+      totalObjPtrs += numObjptrs;
+
+      elemPtr = elemPtr - sizeof(struct CC_workList_elem);
+    }
+    currentChunk = currentChunk->nextChunk;
+  }
+  return totalObjPtrs;
+}
+
 size_t HM_getChunkListUsedSizeWithFilter(HM_chunkList list, bool filter) {
   HM_chunk chunk = HM_getChunkListFirstChunk(list);
   size_t usedSize = 0;

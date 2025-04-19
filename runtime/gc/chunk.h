@@ -284,6 +284,7 @@ pointer HM_storeInchunkListWithPurpose(HM_chunkList chunkList, void* p, size_t o
 HM_chunk HM_getChunkListLastChunk(HM_chunkList chunkList);
 HM_chunk HM_getChunkListFirstChunk(HM_chunkList chunkList);
 uint32_t HM_getNumberOfChunksInChunkList(HM_chunkList chunkList);
+uint32_t HM_getNumberOfObjPtrsInWorkList(GC_state s, HM_chunkList list);
 
 size_t HM_getChunkListSize(HM_chunkList list);
 size_t HM_getChunkListUsedSize(HM_chunkList list);

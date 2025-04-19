@@ -198,6 +198,212 @@ CC_workList HM_splitChunkList(CC_workList workList) {
   return newWorkList;
 }
 
+typedef struct {
+  int totalNumObjPtrs;
+  int numWorklistElems;
+  int worklistElemObjPtrs[]; // Flexible array member
+} WorklistChunkSize;
+
+WorklistChunkSize* createWorklistChunk(int totalObjPtrs, int numElems) {
+  // Allocate memory: size of struct + size of flexible array
+  WorklistChunkSize* chunk = malloc(sizeof(WorklistChunkSize) + numElems * sizeof(int));
+  if (!chunk) {
+    DIE("Failed to allocate memory");
+  }
+
+  chunk->totalNumObjPtrs = totalObjPtrs;
+  chunk->numWorklistElems = numElems;
+
+  return chunk;
+}
+
+void populateWorklistChunk(WorklistChunkSize* chunk, int values[]) {
+  for (int i = 0; i < chunk->numWorklistElems; i++) {
+    chunk->worklistElemObjPtrs[i] = values[i];
+  }
+}
+
+#define INITIAL_LIST_CAPACITY 4  // Initial capacity of list
+
+typedef struct {
+  WorklistChunkSize** chunks; // Array of WorklistChunkSize pointers
+  int size;                   // Current number of elements
+  int capacity;               // Max capacity before reallocation
+} WorklistChunkList;
+
+WorklistChunkList* createChunkList() {
+  WorklistChunkList* list = malloc(sizeof(WorklistChunkList));
+  list->size = 0;
+  list->capacity = INITIAL_LIST_CAPACITY;
+  list->chunks = malloc(list->capacity * sizeof(WorklistChunkSize*));
+  return list;
+}
+
+void addChunkToList(WorklistChunkList* list, WorklistChunkSize* chunk) {
+  if (list->size >= list->capacity) {
+    list->capacity *= 2; // Double capacity
+    list->chunks = realloc(list->chunks, list->capacity * sizeof(WorklistChunkSize*));
+    if (!list->chunks) {
+      DIE("Failed to reallocate memory");
+    }
+  }
+  list->chunks[list->size++] = chunk;
+}
+
+/*
+ * splitWorkList splits the worklist at the worklist_elem level - i.e., within a chunk between two worklist elems
+ * first step - iterate through the worklist to count # of chunks and # of worklist elems within each chunk and # of obj ptrs within each worklist elem
+ * second step - use this information to go the middle of the worklist and then split into two worklists
+ *
+ * TODO: comapare the count of objptrs and other structs before and after splitting
+ */
+CC_workList HM_splitWorkList(GC_state s, CC_workList workList) {
+  HM_chunkList list = &workList->storage;
+  size_t originalSize = list->size;
+  size_t originalUsedSize = list->usedSize;
+  HM_chunk lastChunk = list->lastChunk;
+
+  size_t firstHalfSize = 0;
+  size_t firstHalfUsedSize = 0;
+
+  HM_chunk currentChunk = HM_getChunkListFirstChunk(list);
+  int totalObjPtrs = 0;
+  WorklistChunkList* worklist_chunk_list = createChunkList();
+
+  while (currentChunk != NULL) {
+    printf("new chunk\n");
+    pointer chunkFrontier = HM_getChunkFrontier(currentChunk);
+    pointer chunkStart = HM_getChunkStart(currentChunk);
+    pointer elemPtr = chunkFrontier - sizeof(struct CC_workList_elem);
+
+    int totalNumObjPtrsBeforeChunk = totalObjPtrs;
+    int numOfWorklistElems = (chunkFrontier - chunkStart)/sizeof(struct CC_workList_elem);
+    int numObjPtrsInWorklistElems[numOfWorklistElems];
+    int i = numOfWorklistElems - 1;
+
+    while (elemPtr >= chunkStart && i >= 0) {
+      CC_workList_elem elem = (CC_workList_elem)elemPtr;
+
+      pointer p = objptrToPointer(elem->op, NULL);
+
+      // inspect the object
+      GC_header header;
+      uint16_t bytesNonObjptrs;
+      uint16_t numObjptrs;
+      GC_objectTypeTag tag;
+      header = getHeader(p);
+      splitHeader(s, header, &tag, NULL, &bytesNonObjptrs, &numObjptrs);
+
+      totalObjPtrs += numObjptrs;
+      numObjPtrsInWorklistElems[i--] = numObjptrs;
+
+      elemPtr = elemPtr - sizeof(struct CC_workList_elem);
+    }
+    WorklistChunkSize* worklist_chunk_size =
+      createWorklistChunk(totalObjPtrs - totalNumObjPtrsBeforeChunk,
+        numOfWorklistElems);
+    populateWorklistChunk(worklist_chunk_size, numObjPtrsInWorklistElems);
+    addChunkToList(worklist_chunk_list, worklist_chunk_size);
+    currentChunk = currentChunk->nextChunk;
+  }
+  printf("populated worklist metadata\n");
+
+  int temp = 0;
+  HM_chunk curr_chunk = list->firstChunk;
+  pointer ptrToRemainingWorkListElems = NULL;
+  int numOfRemainingWorkListElems = 0;
+  HM_chunk nextChunkOfNewWorkList = NULL;
+
+  // printf("")
+  bool foundBreakpoint = false;
+  for (int i = 0; i < worklist_chunk_list->size; i++) {
+    WorklistChunkSize* worklist_chunk_size = worklist_chunk_list->chunks[i];
+    if (temp + worklist_chunk_size -> totalNumObjPtrs > totalObjPtrs/2) {
+      int countOfWorkListElemObjPtrs = 0;
+
+      for (int j = 0; j < worklist_chunk_size->numWorklistElems; j++) {
+        countOfWorkListElemObjPtrs += worklist_chunk_size->worklistElemObjPtrs[j];
+        if (countOfWorkListElemObjPtrs + temp > totalObjPtrs/2) {
+          nextChunkOfNewWorkList = curr_chunk->nextChunk;
+          curr_chunk->frontier -= (worklist_chunk_size->numWorklistElems - j - 1) * sizeof(struct CC_workList_elem);
+          curr_chunk->nextChunk = NULL;
+          list->lastChunk = curr_chunk;
+          // firstHalfSize += HM_getChunkSize(curr_chunk) - (worklist_chunk_size->numWorklistElems - i) * sizeof(struct CC_workList_elem);
+          firstHalfSize += HM_getChunkSize(curr_chunk);
+          firstHalfUsedSize += HM_getChunkUsedSize(curr_chunk) - (worklist_chunk_size->numWorklistElems - j - 1) * sizeof(struct CC_workList_elem);
+          list->size = firstHalfSize;
+          list->usedSize = firstHalfUsedSize;
+
+          ptrToRemainingWorkListElems = curr_chunk->frontier;
+          numOfRemainingWorkListElems = worklist_chunk_size->numWorklistElems - j - 1;
+          foundBreakpoint = true;
+          workList->currentChunk = curr_chunk;
+          break;
+        }
+      }
+      if (foundBreakpoint) {break;}
+    }
+    temp += worklist_chunk_size -> totalNumObjPtrs;
+    firstHalfSize += HM_getChunkSize(curr_chunk);
+    firstHalfUsedSize += HM_getChunkUsedSize(curr_chunk);
+    curr_chunk = curr_chunk->nextChunk;
+  }
+
+  HM_chunkList newList = malloc(sizeof(struct HM_chunkList));
+  newList->firstChunk = nextChunkOfNewWorkList;
+  newList->lastChunk = lastChunk;
+  CC_workList newWorkList = malloc(sizeof(struct CC_workList));
+  newWorkList->storage = *newList;
+  if (newList->firstChunk != NULL) {
+    newList->firstChunk->prevChunk = NULL;
+    newList->size = originalSize - firstHalfSize;
+    newList->usedSize = originalUsedSize - firstHalfUsedSize - sizeof(struct CC_workList_elem) * numOfRemainingWorkListElems; // includes the remaining worklist elems that are yet to be added!
+  }
+
+  // add remaining worklist elems in here (should handle the case where there are no more worklist elems and the split needs to happen between two chunk boundaries)
+  // trying to add remaining worklist elems into existing chunk (which may not have enough space)
+  // add a new chunk at the end of the new worklist and add these elems into that - DONE
+
+  if (numOfRemainingWorkListElems != 0) {
+    pointer currentWorkListElem = ptrToRemainingWorkListElems;
+    size_t workListElemSize = sizeof(struct CC_workList_elem);
+    HM_chunk newChunkForNewList = HM_allocateChunkWithPurpose(
+          newList,
+          workListElemSize * numOfRemainingWorkListElems,
+          BLOCK_FOR_GC_WORKLIST); // this also appends this newChunk to the list passed as arg in this fn call
+    // newChunkForNewList->parentHeapId = (s->procNumber+s->cumulativeStatistics->numCCs) * (s->procNumber+s->cumulativeStatistics->numCCs+1)/2 + s->cumulativeStatistics->numCCs;
+    newWorkList->currentChunk = newChunkForNewList;
+    // newList->lastChunk = newChunkForNewList;
+    if (newList->firstChunk == NULL) {
+      newList->firstChunk = newChunkForNewList;
+      newList->firstChunk->prevChunk = NULL;
+      newList->firstChunk->nextChunk = NULL;
+    }
+    printf("beginning to add remaining worklist elems to new chunk added to back of the new list\n");
+    for (int i = 0; i < numOfRemainingWorkListElems; i++) {
+      struct CC_workList_elem elem = *((CC_workList_elem) currentWorkListElem);
+      pointer frontier = HM_getChunkFrontier(newChunkForNewList);
+      *(CC_workList_elem) frontier = elem;
+
+      HM_updateChunkFrontierInList(
+        newList,
+        newChunkForNewList, // TODO: make sure this is the new chunk you added previously
+        frontier + workListElemSize); // also updates the newList sizes
+      // will need to change this because size = chunk size which remains const
+      // newList->size += workListElemSize;
+      // newList->usedSize += workListElemSize;
+      currentWorkListElem += workListElemSize;
+    }
+  }
+  else {
+    if (newList->firstChunk == NULL) {
+      return NULL;
+    }
+    newWorkList->currentChunk = newList->lastChunk;
+  }
+
+  return newWorkList;
+}
 
 struct advanceOneFieldResult {
   objptr* field;

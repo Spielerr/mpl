@@ -7,7 +7,7 @@
  * Implementation of the concurrent collection interface
  */
 #include "concurrent-collection.h"
-#define SPLIT_SIZE 1
+#define SPLIT_SIZE 2
 #define K 10
 
 
@@ -384,7 +384,7 @@ void markLoop(GC_state s, ConcurrentCollectArgs* args) {
 }
 
 // Returns number of items processed
-int markLoop2(GC_state s, ConcurrentCollectArgs* args, int limit) {
+void markLoop2(GC_state s, ConcurrentCollectArgs* args, int limit) {
   printf("marking loop 2******************\n");
   struct GC_foreachObjptrClosure markAddClosure =
     {.fun = tryMarkAndAddToWorkList, .env = (void*)args};
@@ -418,9 +418,14 @@ void unmarkLoop(GC_state s, ConcurrentCollectArgs* args) {
   assert(CC_workList_isEmpty(s, worklist));
 }
 
-void tryMarkAndMarkLoop(GC_state s, objptr *opp, objptr op, void* rawArgs) {
+void tryMarkAndMarkLoopNoLoop(GC_state s, objptr *opp, objptr op, void* rawArgs) {
   tryMarkAndAddToWorkList(s, opp, op, rawArgs);
   // markLoop(s, rawArgs);
+}
+
+void tryMarkAndMarkLoop(GC_state s, objptr *opp, objptr op, void* rawArgs) {
+  tryMarkAndAddToWorkList(s, opp, op, rawArgs);
+  markLoop(s, rawArgs);
 }
 
 void tryUnmarkAndUnmarkLoop(GC_state s, objptr *opp, objptr op, void* rawArgs) {
@@ -450,9 +455,9 @@ void forwardPtrChunk (GC_state s, objptr *opp, void* rawArgs) {
 
 void forwardPinned(GC_state s, HM_remembered remElem, void* rawArgs) {
   objptr src = remElem->object;
-  tryMarkAndMarkLoop(s, &src, src, rawArgs);
+  tryMarkAndMarkLoopNoLoop(s, &src, src, rawArgs);
   if (remElem->from != BOGUS_OBJPTR) {
-    tryMarkAndMarkLoop(s, &(remElem->from), remElem->from, rawArgs);
+    tryMarkAndMarkLoopNoLoop(s, &(remElem->from), remElem->from, rawArgs);
   }
 
 #if 0
@@ -922,7 +927,7 @@ CGC_process* initializeCGC(
   printf("Initializing CGC\n");
 
   GC_state s = pthread_getspecific (gcstate_key);
-  GC_thread thread = threadObjptrToStruct(s, pointerToObjptr(threadp, NULL));
+  GC_thread thread = threadObjptrToStruct(s,  pointerToObjptr(threadp, NULL));
   HM_HierarchicalHeap targetHH = (HM_HierarchicalHeap)hhp;
 
   if (!checkLocalScheduler(s) || thread->currentDepth<=0) {
@@ -1333,8 +1338,8 @@ void finalizeCC(pointer threadp,
 
 }
 
-bool isSplittable(CGC_process *cgc_process) {
-  if(HM_getNumberOfChunksInChunkList(&cgc_process->lists->worklist.storage) > SPLIT_SIZE) {
+bool isSplittable(GC_state s, CGC_process *cgc_process) {
+  if(HM_getNumberOfObjPtrsInWorkList(s, &cgc_process->lists->worklist.storage) > SPLIT_SIZE) {
     printf("worklist is splittable\n");
     return TRUE;
   }
@@ -1343,7 +1348,7 @@ bool isSplittable(CGC_process *cgc_process) {
   return FALSE;
 }
 
-CGC_process* splitWork(CGC_process *cgc_process) {
+CGC_process* splitWork(GC_state s, CGC_process *cgc_process) {
   printf("worklist is getting split\n");
   CGC_process* newProcess = malloc(sizeof(CGC_process));
   ConcurrentCollectArgs* newLists = malloc(sizeof(ConcurrentCollectArgs));
@@ -1356,10 +1361,19 @@ CGC_process* splitWork(CGC_process *cgc_process) {
   else {
     DIE("lists malloc failed\n");
   }
-  newLists->worklist = *HM_splitChunkList(&cgc_process->lists->worklist);
-  newProcess->lists = newLists;
+  CC_workList splitResult = HM_splitWorkList(s, &cgc_process->lists->worklist);
+  if (!splitResult) {
+    newLists->worklist = *splitResult;
+    printf("split was successful\n");
+    newProcess->lists = newLists;
 
-  return newProcess;
+    return newProcess;
+  }
+  else {
+    free(newProcess);
+    free(newLists);
+    return NULL;
+  }
 }
 
 void doWork(GC_state s, CGC_process *cgc_process) {
@@ -1376,9 +1390,9 @@ void runCGC(CGC_process* cgc_process) {
       printf("worklist empty\n");
       return;
     }
-    if(isSplittable(cgc_process)) {
+    if(isSplittable(s, cgc_process)) {
       printf("Worklist big enough to be split\n");
-      CGC_process* forked_cgc_process = splitWork(cgc_process);
+      CGC_process* forked_cgc_process = splitWork(s, cgc_process);
       runCGC(cgc_process);
       runCGC(forked_cgc_process);
       return;
