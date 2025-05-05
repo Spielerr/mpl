@@ -367,7 +367,6 @@ void tryUnmarkAndAddToWorkList(
 }
 
 void markLoop(GC_state s, ConcurrentCollectArgs* args) {
-  printf("marking loop\n");
   struct GC_foreachObjptrClosure markAddClosure =
     {.fun = tryMarkAndAddToWorkList, .env = (void*)args};
 
@@ -385,7 +384,6 @@ void markLoop(GC_state s, ConcurrentCollectArgs* args) {
 
 // Returns number of items processed
 void markLoop2(GC_state s, ConcurrentCollectArgs* args, int limit) {
-  printf("marking loop 2******************\n");
   struct GC_foreachObjptrClosure markAddClosure =
     {.fun = tryMarkAndAddToWorkList, .env = (void*)args};
 
@@ -393,13 +391,14 @@ void markLoop2(GC_state s, ConcurrentCollectArgs* args, int limit) {
   int processed = 0;
 
   objptr* current = CC_workList_pop(s, worklist);
-  while (NULL != current && processed < limit) {
+  while (NULL != current) {
     callIfIsObjptr(s, &markAddClosure, current);
-    current = CC_workList_pop(s, worklist);
     processed++;
+    if (processed >= limit) {
+      break;
+    }
+    current = CC_workList_pop(s, worklist);
   }
-
-  // return processed;
 }
 
 
@@ -953,13 +952,10 @@ CGC_process* initializeCGC(
 
   // size_t beforeSize = HM_getChunkListSize(HM_HH_getChunkList(heap));
 
-  // ------------------------------------------------------------------------------------
-
   CGC_process* cgc_process = malloc(sizeof(CGC_process));
   cgc_process->live = 0;
   cgc_process->numObjectsMarked = 0;
   cgc_process->beforeSize = HM_getChunkListSize(HM_HH_getChunkList(targetHH));
-
   getStackCurrent(s)->used = sizeofGCStateCurrentStackUsed(s);
   getThreadCurrent(s)->exnStack = s->exnStack;
   HM_HH_updateValues(getThreadCurrent(s), s->frontier);
@@ -1075,11 +1071,6 @@ CGC_process* initializeCGC(
   forceForward(s, &(cp->additionalStack), lists);
 
   return cgc_process;
-}
-
-bool isDone(GC_state s, CGC_process* cgc_process) {
-  CC_workList worklist = &(cgc_process->lists->worklist);
-  return CC_workList_isEmpty(s, worklist);
 }
 
 void finalizeCC(pointer threadp, 
@@ -1338,13 +1329,15 @@ void finalizeCC(pointer threadp,
 
 }
 
+bool isDone(GC_state s, CGC_process* cgc_process) {
+  CC_workList worklist = &(cgc_process->lists->worklist);
+  return CC_workList_isEmpty(s, worklist);
+}
+
 bool isSplittable(GC_state s, CGC_process *cgc_process) {
-  if(HM_getNumberOfObjPtrsInWorkList(s, &cgc_process->lists->worklist.storage) > SPLIT_SIZE) {
-    printf("worklist is splittable\n");
+  if(HM_getSplitCount(s, cgc_process->lists->worklist.currentChunk) > SPLIT_SIZE) {
     return TRUE;
   }
-  printf("worklist chunk size: %lu\n", HM_getChunkListUsedSize(&cgc_process->lists->worklist.storage));
-  printf("not splittable\n");
   return FALSE;
 }
 
@@ -1361,109 +1354,14 @@ CGC_process* splitWork(GC_state s, CGC_process *cgc_process) {
   else {
     DIE("lists malloc failed\n");
   }
-  CC_workList splitResult = HM_splitWorkList(s, &cgc_process->lists->worklist);
-  if (!splitResult) {
-    newLists->worklist = *splitResult;
-    printf("split was successful\n");
-    newProcess->lists = newLists;
+  newLists->worklist = *HM_splitWorkList(s, &cgc_process->lists->worklist);
+  newProcess->lists = newLists;
 
-    return newProcess;
-  }
-  else {
-    free(newProcess);
-    free(newLists);
-    return NULL;
-  }
+  return newProcess;
 }
 
 void doWork(GC_state s, CGC_process *cgc_process) {
-  printf("does some work\n");
   markLoop2(s, cgc_process->lists, K);
-}
-
-// test
-void runCGC(CGC_process* cgc_process) {
-  // KKG_TODO: make s static?
-  GC_state s = pthread_getspecific (gcstate_key);
-  while(true) {
-    if(isDone(s, cgc_process)) {
-      printf("worklist empty\n");
-      return;
-    }
-    if(isSplittable(s, cgc_process)) {
-      printf("Worklist big enough to be split\n");
-      CGC_process* forked_cgc_process = splitWork(s, cgc_process);
-      runCGC(cgc_process);
-      runCGC(forked_cgc_process);
-      return;
-    }
-    // create a wrapper which just uses cgc_process and use it as the sole interface object.
-    doWork(s, cgc_process);
-    // markLoop(s, cgc_process->lists); // doWork function - does k units of work on the markLoop and then splits up the rest of the remaining worklist - implementing the dfs paper
-  }
-}
-
-// void runCGC2(CGC_process* cgc_process) {
-//   GC_state s = pthread_getspecific(gcstate_key);
-//   int workDone = 0; // Track total work done locally
-//   // const int D = 256; // Polling frequency
-//   const int K = 1024; // Granularity control
-//
-//   while(true) {
-//     if(isDone(s, cgc_process)) {
-//       return;
-//     }
-//
-//     if(isWorklistEmpty(cgc_process)) {
-//       if(!acquireWorkFromOthers(cgc_process)) {
-//         if(globalWorkComplete()) {
-//           return;
-//         }
-//         continue; // Keep trying to get work
-//       }
-//     }
-//
-//     if(hasIncomingQuery()) {
-//       int worklistSize = getWorklistSize(cgc_process);
-//       if((worklistSize > K) || (workDone > K && worklistSize > 1)) {
-//         CGC_process* forked_cgc_process = splitWork(cgc_process);
-//         workDone = 0;
-//         replyToQuery(forked_cgc_process);
-//       } else {
-//         rejectQuery();
-//       }
-//     }
-//
-//     // Do a limited amount of work
-//     int itemsProcessed = markLoop2(s, cgc_process, K);
-//     workDone += itemsProcessed;
-//
-//     // If the worklist is still not empty, continue processing
-//     // Otherwise, the next iteration will try to acquire more work
-//   }
-// }
-
-
-uint64_t CGC_getWorkLists(CGC_process* cgc_process) {
-  return (uint64_t)(cgc_process->lists);
-}
-
-// refactoring this function
-void CC_collectAtRoot(
-  pointer threadp, pointer hhp)
-{
-  printf("start initializeCGC\n");
-  CGC_process* cgc_process = initializeCGC(
-    threadp, hhp);
-  printf("end initializeCGC\n");
-
-  printf("start runCGC\n");
-  runCGC(cgc_process);
-  printf("end runCGC\n");
-
-  printf("start finalizeCC\n");
-  finalizeCC(threadp, hhp, cgc_process);
-  printf("end finalizeCC\n");
 }
 
 #endif

@@ -56,6 +56,47 @@ struct
   val splitWork = _import "splitWork" runtime private: (gcstate * CGC_process) -> CGC_process;
   val doWork = _import "doWork" runtime private: (gcstate * CGC_process) -> unit;
 
+  (* fun collectThreadRoot_sml (t: MLton.Thread.t, hh: Word64.word) =
+      HH.collectThreadRoot(t, hh) *)
+
+    fun runCGC (cgc_process: CGC_process) =
+      let
+        fun loop proc =
+          let
+            val s = gcstate ()
+          in
+            (* doWork at the top of the loop *)
+            doWork (s, proc);
+
+            if isDone (s, proc) then
+              (print "isDone=true, exiting\n"; ())
+            else if isSplittable (s, proc) then
+              let
+                val forked = splitWork (s, proc)
+              in
+                loop proc;
+                loop forked
+              end
+            else
+              (* if neither done nor splittable, just recurse *)
+              loop proc
+          end
+      in
+        print "Starting runCGC...\n";
+        loop cgc_process;
+        print "Finished runCGC\n"
+      end
+
+    fun collectThreadRoot_sml (threadp, hhp) =
+    let
+      val _ = print "running CGC\n"
+      val cgc_process = initializeCGC (threadp, hhp)
+    in
+      runCGC cgc_process;
+      finalize_CC (threadp, hhp, cgc_process);
+      print "finalized CGC\n"
+    end
+
 
 
   val getHeartbeatMicroseconds =
@@ -981,45 +1022,7 @@ struct
 
 
 
-  (* fun collectThreadRoot_sml (t: MLton.Thread.t, hh: Word64.word) =
-    HH.collectThreadRoot(t, hh) *)
 
-  fun runCGC (cgc_process: CGC_process) =
-  let
-    fun loop proc =
-      let
-        val _ = print ("runCGC loop start\n")
-        val s = gcstate ()
-      in
-        if isDone (s, proc) then
-          (print "isDone=true, exiting\n"; ())
-        else if isSplittable (s, proc) then
-          let
-            val _ = print "isSplittable=true, splitting work\n"
-            val forked = splitWork (s, proc)
-          in
-            (* simpleParFork (fn () => loop proc, fn () => loop forked); *)
-            loop proc;
-            loop forked
-          end
-        else
-          (print "Processing work...\n";
-           doWork (s, cgc_process);
-           loop proc)
-      end
-  in
-    print "Starting runCGC...\n";
-    loop cgc_process;
-    print "Finished runCGC\n"
-  end
-
-  fun collectThreadRoot_sml (threadp, hhp) =
-  let
-    val cgc_process = initializeCGC (threadp, hhp)
-  in
-    runCGC cgc_process;
-    finalize_CC (threadp, hhp, cgc_process)
-  end
 
 
   

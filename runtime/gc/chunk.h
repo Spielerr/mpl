@@ -141,7 +141,6 @@ static inline HM_chunk HM_getChunkOf(pointer p) {
   /* Must be strictly less than the limit; a pointer at the limit would be
    * considered a pointer into the next physically adjacent chunk */
   assert(p < chunk->limit);
-
   return chunk;
 }
 
@@ -284,7 +283,8 @@ pointer HM_storeInchunkListWithPurpose(HM_chunkList chunkList, void* p, size_t o
 HM_chunk HM_getChunkListLastChunk(HM_chunkList chunkList);
 HM_chunk HM_getChunkListFirstChunk(HM_chunkList chunkList);
 uint32_t HM_getNumberOfChunksInChunkList(HM_chunkList chunkList);
-uint32_t HM_getNumberOfObjPtrsInWorkList(GC_state s, HM_chunkList list);
+uint32_t HM_getNumberOfObjPtrsInWorkList(GC_state s, HM_chunk currentChunk);
+uint32_t HM_getSplitCount(GC_state s, HM_chunk currentChunk);
 
 size_t HM_getChunkListSize(HM_chunkList list);
 size_t HM_getChunkListUsedSize(HM_chunkList list);
@@ -315,6 +315,7 @@ struct HM_HierarchicalHeap* HM_getLevelHeadPathCompress(HM_chunk chunk);
 bool listContainsChunk(HM_chunkList list, HM_chunk theChunk);
 
 void HM_assertChunkListInvariants(HM_chunkList list);
+void HM_assertChunkListInvariants2(HM_chunkList chunkList);
 
 #endif /* MLTON_GC_INTERNAL_FUNCS */
 

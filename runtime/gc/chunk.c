@@ -277,6 +277,31 @@ HM_chunk HM_allocateChunkWithPurpose(
   return chunk;
 }
 
+HM_chunk HM_allocateChunkWithPurposeAndAddToFront(
+  HM_chunkList list,
+  size_t bytesRequested,
+  enum BlockPurpose purpose)
+{
+  GC_state s = pthread_getspecific(gcstate_key);
+  HM_chunk chunk = HM_getFreeChunkWithPurpose(s, bytesRequested, purpose);
+
+  if (NULL == chunk) {
+    DIE("Out of memory. Unable to allocate chunk of size %zu.",
+        bytesRequested);
+    return NULL;
+  }
+
+  s->cumulativeStatistics->bytesAllocated += HM_getChunkSize(chunk);
+
+  assert(chunk->frontier == HM_getChunkStart(chunk));
+  assert(chunk->mightContainMultipleObjects);
+  assert((size_t)(chunk->limit - chunk->frontier) >= bytesRequested);
+
+  HM_prependChunk(list, chunk);
+
+  return chunk;
+}
+
 
 HM_chunk HM_allocateChunk(HM_chunkList list, size_t bytesRequested) {
   return HM_allocateChunkWithPurpose(list, bytesRequested, BLOCK_FOR_UNKNOWN_PURPOSE);
@@ -520,28 +545,47 @@ uint32_t HM_getNumberOfWorklistElemsInChunk(HM_chunk chunk) {
   return ans;
 }
 
-uint32_t HM_getNumberOfWorklistElemsInChunkList(HM_chunkList list) {
-  //printf("chunklist size: %lu", HM_getChunkListUsedSize(list));
+uint32_t HM_getNumberOfWorklistElemsInChunkList(HM_chunk currentChunk) {
   uint32_t count = 0;
-  HM_chunk chunk = HM_getChunkListFirstChunk(list);
-  while (chunk != NULL) {
-    HM_chunk tmp = chunk->nextChunk;
-    count += HM_getNumberOfWorklistElemsInChunk(chunk);
-    chunk = tmp;
+  while (currentChunk != NULL) {
+    HM_chunk tmp = currentChunk->nextChunk;
+    count += HM_getNumberOfWorklistElemsInChunk(currentChunk);
+    currentChunk = tmp;
   }
   return count;
 }
 
-uint32_t HM_getNumberOfObjPtrsInWorkList(GC_state s, HM_chunkList list) {
-  HM_chunk currentChunk = HM_getChunkListFirstChunk(list);
+uint32_t HM_getSplitCount(GC_state s, HM_chunk currentChunk) {
+  pointer chunkFrontier = HM_getChunkFrontier(currentChunk);
+  pointer chunkStart = HM_getChunkStart(currentChunk);
+  int numOfWorklistElems = (chunkFrontier - chunkStart)/sizeof(struct CC_workList_elem);
+  if (currentChunk -> prevChunk == NULL && numOfWorklistElems == 1) {
+    return 0;
+  }
+  else {
+    return HM_getNumberOfObjPtrsInWorkList(s, currentChunk);
+  }
+}
+
+/*
+ *TODO: consider the type (normal, seq, stack) and calculate numobjptrs appropriately
+ **/
+uint32_t HM_getNumberOfObjPtrsInWorkList(GC_state s, HM_chunk currentChunk) {
+  // HM_chunkList list = &worklist->storage;
+  // HM_chunk currentChunk = worklist->currentChunk;
   uint32_t totalObjPtrs = 0;
 
+  // if there is a single chunk and a single worklist elem in that chunk - then so split is possible - return 0 to force a non-split
+  pointer chunkFrontier = HM_getChunkFrontier(currentChunk);
+  pointer chunkStart = HM_getChunkStart(currentChunk);
+  int numOfWorklistElems = (chunkFrontier - chunkStart)/sizeof(struct CC_workList_elem);
+
   while (currentChunk != NULL) {
-    pointer chunkFrontier = HM_getChunkFrontier(currentChunk);
-    pointer chunkStart = HM_getChunkStart(currentChunk);
+    chunkFrontier = HM_getChunkFrontier(currentChunk);
+    chunkStart = HM_getChunkStart(currentChunk);
     pointer elemPtr = chunkFrontier - sizeof(struct CC_workList_elem);
 
-    int numOfWorklistElems = (chunkFrontier - chunkStart)/sizeof(struct CC_workList_elem);
+    numOfWorklistElems = (chunkFrontier - chunkStart)/sizeof(struct CC_workList_elem);
     int i = numOfWorklistElems - 1;
 
     while (elemPtr >= chunkStart && i >= 0) {
@@ -721,7 +765,7 @@ void HM_assertChunkListInvariants(HM_chunkList chunkList) {
   /* SAM_NOTE: TODO: checking {size,usedSize} is disabled here because some
    * chunklists track sizes while others do not. (See 50cd7dd and related
    * commits.) It would be a good idea to distinguish these with separate
-   * types, and then we can do precise invariants for both. 
+   * types, and then we can do precise invariants for both.
    */
 
   // size_t size = 0;
@@ -747,6 +791,27 @@ void HM_assertChunkListInvariants(HM_chunkList chunkList) {
   ((void)(chunkList));
 }
 #endif /* ASSERT */
+
+void HM_assertChunkListInvariants2(HM_chunkList chunkList) {
+
+  // size_t size = 0;
+  // size_t usedSize = 0;
+  HM_chunk chunk = chunkList->firstChunk;
+  while (NULL != chunk) {
+    assert(HM_getChunkStart(chunk) <= chunk->frontier);
+    assert(chunk->frontier <= chunk->limit);
+    // size += HM_getChunkSize(chunk);
+    // usedSize += HM_getChunkUsedSize(chunk);
+    if (chunk->nextChunk == NULL) {
+      break;
+    }
+    assert(chunk->nextChunk->prevChunk == chunk);
+    chunk = chunk->nextChunk;
+  }
+  assert(chunkList->lastChunk == chunk);
+  // assert(chunkList->size == size);
+  // assert(chunkList->usedSize == usedSize);
+}
 
 uint32_t HM_getObjptrDepth(objptr op) {
   return HM_getLevelHead(HM_getChunkOf(objptrToPointer(op, NULL)))->depth;
